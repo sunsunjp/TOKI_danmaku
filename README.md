@@ -36,4 +36,4 @@ A minimalist, frame-rate–independent bullet-dodging game that runs in modern b
 ---
 
 ## License
-https://github.com/sunsunjp/TOKI_danmaku/tree/main?tab=Apache-2.0-1-ov-file#
+**Apache-2.0**
