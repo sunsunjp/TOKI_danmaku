@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Danmaku Dodge (Vanilla JS)</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; margin: 0; background: #0b0b0f; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; }
+    .wrap { min-height: 100%; display: grid; place-items: center; padding: 16px; box-sizing: border-box; }
+    canvas {
+      background: radial-gradient(1200px 1200px at 50% 40%, #131320 0%, #0b0b0f 70%);
+      border: 1px solid #1f2330;
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      touch-action: none; /* 重要: ドラッグでページがスクロールしない */
+    }
+    .hint {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      color: #c9d1d9; font-size: 14px; letter-spacing: .2px; mix-blend-mode: difference; user-select: none;
+      text-shadow: 0 1px 0 rgba(0,0,0,.35);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="720" height="960"></canvas>
+  </div>
+  <div class="hint">Move: WASD / ↑↓←→ ・ Drag: Follow ・ P: Pause ・ R: Restart</div>
+
+  <script>
+  (() => {
+    // ===== Constants =====
+    const W = 720, H = 960;
+    const MARGIN = 8;                 // クランプ余白
+    const PLAYER_R = 8;               // ヒットボックス半径
+    const PLAYER_SPEED = 280;         // キーボード移動 (px/s)
+    const FOLLOW_SPEED_MAX = 280;     // ドラッグ追従の速度上限 (px/s)
+    const BULLET_POOL_SIZE = 1600;    // 必要に応じて増減
+    const OUT_MARGIN = 24;            // 画面外判定の余白
+    const TWO_PI = Math.PI * 2;
+
+    // === Hitbox style ===
+    const HITBOX_COLOR = '#39FF14';  // 好きな色（例：ネオングリーン）
+    const HITBOX_ALPHA = 1.0;        // 0.0〜1.0（不透明度）
+    const HITBOX_WIDTH = 1.8;        // 線の太さ(px)
+
+    // ===== Player sprite =====
+    const playerImg = new Image();
+    playerImg.src = 'player.png';     // 同フォルダのplayer.pngを参照
+    let playerImgReady = false;
+
+    // できるだけ早く描画可能に
+    playerImg.decode?.().then(() => { playerImgReady = true; })
+    .catch(() => { /* decode未対応ブラウザ or 失敗時はonloadでフォールバック */ });
+    playerImg.onload = () => { playerImgReady = true; };
+    playerImg.onerror = () => { console.warn('player.png の読み込みに失敗しました（円描画にフォールバック）'); };
+
+    // 難易度スカラーを時間t(秒)から計算
+    function difficultyAt(t) {
+      // 成長のしやすさ（好みに合わせて調整）
+      const fireK = 0.025;            // 発射レート成長係数
+      const speedK = 0.018;           // 弾速成長係数
+      const cntStepSec = 15;          // 何秒ごとに弾数を増やすか
+
+      const fire = Math.min(3.0, 1 + fireK * t);           // 1.0→最大3.0
+      const speed = Math.min(2.2, 1 + speedK * t);         // 1.0→最大2.2
+      const countBonus = Math.min(32, Math.floor(t / cntStepSec) * 2); // 15秒ごとに+2、最大+32
+      return { fire, speed, countBonus };
+    }
+
+    // ===== Canvas / DPI =====
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    function setupDPI() {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      canvas.style.width  = W + 'px';
+      canvas.style.height = H + 'px';
+      canvas.width  = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // 論理座標=CSS px
+    }
+    setupDPI();
+    window.addEventListener('resize', setupDPI);
+
+    // ===== Utilities =====
+    const clamp = (v, min, max) => v < min ? min : (v > max ? max : v);
+    function len2(x, y) { return x*x + y*y; }
+    function norm(x, y) {
+      const l = Math.hypot(x, y); return l > 1e-6 ? [x / l, y / l] : [0, 0];
+    }
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+    function fromAngle(a) { return [Math.cos(a), Math.sin(a)]; }
+
+    // ===== Input =====
+    const keys = new Set();
+    document.addEventListener('keydown', e => { keys.add(e.code); if (e.code === 'Space') e.preventDefault(); });
+    document.addEventListener('keyup',   e => keys.delete(e.code));
+
+    // Pointer follow (primary only)
+    let pointerActive = false, pointerId = -1, pointerX = W/2, pointerY = H/2;
+    function canvasPos(evt) {
+      const r = canvas.getBoundingClientRect();
+      // ctxはdprスケール済み。論理座標に戻すため dpr を考慮
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const x = (evt.clientX - r.left) * (canvas.width / r.width) / dpr;
+      const y = (evt.clientY - r.top)  * (canvas.height / r.height) / dpr;
+      return [x, y];
+    }
+    canvas.addEventListener('pointerdown', (e) => {
+      if (pointerActive) return;
+      pointerActive = true; pointerId = e.pointerId;
+      [pointerX, pointerY] = canvasPos(e);
+      canvas.setPointerCapture(pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!pointerActive || e.pointerId !== pointerId) return;
+      [pointerX, pointerY] = canvasPos(e);
+    });
+    function clearPointer(e) {
+      if (e.pointerId !== pointerId) return;
+      pointerActive = false; pointerId = -1;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    }
+    canvas.addEventListener('pointerup', clearPointer);
+    canvas.addEventListener('pointercancel', clearPointer);
+    canvas.addEventListener('pointerout', (e) => { if (e.pointerId === pointerId) clearPointer(e); });
+
+    // ===== Game State =====
+    const state = {
+      running: true,
+      paused: false,
+      time: 0,           // 累積生存時間 (s) ※停止中は進めない
+      startedAt: 0,      // 実時間ベースの開始時刻 (s)
+      gameOver: false,
+    };
+
+    const player = {
+      x: W/2, y: H*0.75, r: PLAYER_R
+    };
+
+    // ===== Bullets (Object Pool) =====
+    const bullets = new Array(BULLET_POOL_SIZE);
+    for (let i = 0; i < BULLET_POOL_SIZE; i++) {
+      bullets[i] = { x: 0, y: 0, vx: 0, vy: 0, r: 0, alive: false };
+    }
+    let bulletCount = 0;
+    function spawnBullet(x, y, vx, vy, r) {
+      // 再利用
+      for (let i = 0; i < BULLET_POOL_SIZE; i++) {
+        const b = bullets[i];
+        if (!b.alive) {
+          b.x = x; b.y = y; b.vx = vx; b.vy = vy; b.r = r; b.alive = true;
+          bulletCount++;
+          return b;
+        }
+      }
+      // プール枯渇時は無視（サイズを増やす）
+    }
+
+    function resetGame() {
+      state.running = true;
+      state.paused = false;
+      state.time = 0;
+      state.gameOver = false;
+      player.x = W/2; player.y = H*0.75;
+
+      // 弾全消去
+      for (const b of bullets) b.alive = false;
+      bulletCount = 0;
+
+      // パターンタイマ初期化
+      ringTimer = 0;
+      spiralTimer = 0;
+      spiralAngle = 0;
+      aimedTimer = 0;
+
+      lastTick = performance.now();
+      draw(0); // 1フレーム描画
+    }
+
+    // ===== Patterns =====
+    let ringTimer = 0;
+    function patternRing(dt) {
+      ringTimer += dt;
+      const d = difficultyAt(state.time);
+      const cooldown = 1.6 / d.fire;                   // 発射間隔を短縮
+      if (ringTimer >= cooldown) {
+        ringTimer = 0;
+        const cx = W/2, cy = H*0.28;
+        const baseN = 8;
+        // const baseN = 32;
+        const N = Math.min(64, baseN + d.countBonus);  // 弾数増
+        const speed = 150 * d.speed;                   // 弾速UP
+        const r = rand(6, 10);                         // 必要なら小さくして難しく：rand(5.5, 9)
+        const phase = Math.random() * Math.PI * 2;
+        for (let i = 0; i < N; i++) {
+          const a = phase + i * ((Math.PI * 2) / N);
+          const [dx, dy] = [Math.cos(a), Math.sin(a)];
+          spawnBullet(cx, cy, dx * speed, dy * speed, r);
+        }
+      }
+    }
+
+    // function patternRing(dt) {
+    //   ringTimer += dt;
+    //   if (ringTimer >= 1.6) {
+    //     ringTimer = 0;
+    //     const cx = W/2, cy = H*0.28;
+    //     const N = 32;
+    //     const speed = 150;
+    //     const r = rand(6, 10);
+    //     const phase = Math.random() * TWO_PI;
+    //     for (let i = 0; i < N; i++) {
+    //       const a = phase + i * (TWO_PI / N);
+    //       const [dx, dy] = fromAngle(a);
+    //       spawnBullet(cx, cy, dx * speed, dy * speed, r);
+    //     }
+    //   }
+    // }
+
+    let spiralTimer = 0, spiralAngle = 0;
+    function patternSpiral(dt) {
+      spiralTimer += dt;
+      const d = difficultyAt(state.time);
+      const interval = 0.50 / d.fire;      // 連射間隔を短縮
+      // const interval = 0.03 / d.fire;      // 連射間隔を短縮
+      while (spiralTimer >= interval) {
+        spiralTimer -= interval;
+        spiralAngle += 0.25;               // 回転は据え置き or 上げてもOK
+        const cx = W/2, cy = H*0.28;
+        const speed = 170 * d.speed;       // 弾速UP
+        const [dx, dy] = [Math.cos(spiralAngle), Math.sin(spiralAngle)];
+        spawnBullet(cx, cy, dx * speed, dy * speed, rand(6, 9));
+      }
+    }
+
+    // function patternSpiral(dt) {
+    //   spiralTimer += dt;
+    //   const interval = 0.03; // 33発/秒
+    //   while (spiralTimer >= interval) {
+    //     spiralTimer -= interval;
+    //     spiralAngle += 0.25; // 回転速度
+    //     const cx = W/2, cy = H*0.28;
+    //     const speed = 170;
+    //     const [dx, dy] = fromAngle(spiralAngle);
+    //     spawnBullet(cx, cy, dx * speed, dy * speed, rand(6, 9));
+    //   }
+    // }
+
+    let aimedTimer = 0;
+    function patternAimed(dt) {
+      aimedTimer += dt;
+      const d = difficultyAt(state.time);
+      const cooldown = 3.00 / d.fire;      // 発射間隔短縮
+      // const cooldown = 0.45 / d.fire;      // 発射間隔短縮
+      if (aimedTimer >= cooldown) {
+        aimedTimer = 0;
+        const edge = Math.floor(Math.random() * 4);
+        let x, y;
+        if (edge === 0) { x = rand(0, W); y = -OUT_MARGIN; }
+        else if (edge === 1) { x = W + OUT_MARGIN; y = rand(0, H); }
+        else if (edge === 2) { x = rand(0, W); y = H + OUT_MARGIN; }
+        else { x = -OUT_MARGIN; y = rand(0, H); }
+
+        let vx = player.x - x, vy = player.y - y;
+        const l = Math.hypot(vx, vy) || 1;
+        const nx = vx / l, ny = vy / l;
+
+        // 基本レンジに倍率
+        const baseMin = 140, baseMax = 240;
+        const speed = rand(baseMin, baseMax) * d.speed;
+        spawnBullet(x, y, nx * speed, ny * speed, rand(6, 9.5));
+      }
+    }
+
+    // function patternAimed(dt) {
+    //   aimedTimer += dt;
+    //   if (aimedTimer >= 0.45) {
+    //     aimedTimer = 0;
+    //     // 画面端のどこかから出現
+    //     const edge = Math.floor(Math.random() * 4);
+    //     let x, y;
+    //     if (edge === 0) { x = rand(0, W); y = -OUT_MARGIN; }      // 上
+    //     else if (edge === 1) { x = W + OUT_MARGIN; y = rand(0, H);} // 右
+    //     else if (edge === 2) { x = rand(0, W); y = H + OUT_MARGIN;} // 下
+    //     else { x = -OUT_MARGIN; y = rand(0, H); }                   // 左
+    //     // プレイヤー方向へ
+    //     let vx = player.x - x, vy = player.y - y;
+    //     const [nx, ny] = norm(vx, vy);
+    //     const speed = rand(140, 240);
+    //     spawnBullet(x, y, nx * speed, ny * speed, rand(6, 9.5));
+    //   }
+    // }
+
+    function updateBullets(dt) {
+      const left = -OUT_MARGIN, right = W + OUT_MARGIN, top = -OUT_MARGIN, bottom = H + OUT_MARGIN;
+      for (const b of bullets) {
+        if (!b.alive) continue;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        if (b.x < left || b.x > right || b.y < top || b.y > bottom) {
+          b.alive = false;
+          bulletCount--;
+        }
+      }
+    }
+
+    // ===== Player movement =====
+    function updatePlayer(dt) {
+      if (pointerActive) {
+        // 追従：プレイヤー -> ポインタへ向かう
+        const dx = pointerX - player.x;
+        const dy = pointerY - player.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 1e-3) {
+          const [nx, ny] = [dx / dist, dy / dist];
+          const step = FOLLOW_SPEED_MAX * dt;
+          if (dist <= step) {
+            player.x = pointerX;
+            player.y = pointerY;
+          } else {
+            player.x += nx * step;
+            player.y += ny * step;
+          }
+        }
+      } else {
+        // キーボード入力
+        let ix = 0, iy = 0;
+        if (keys.has('ArrowLeft') || keys.has('KeyA')) ix -= 1;
+        if (keys.has('ArrowRight')|| keys.has('KeyD')) ix += 1;
+        if (keys.has('ArrowUp')   || keys.has('KeyW')) iy -= 1;
+        if (keys.has('ArrowDown') || keys.has('KeyS')) iy += 1;
+        if (ix !== 0 || iy !== 0) {
+          const [nx, ny] = norm(ix, iy);
+          player.x += nx * PLAYER_SPEED * dt;
+          player.y += ny * PLAYER_SPEED * dt;
+        }
+      }
+      // キャンバス内に8px余白でクランプ
+      player.x = clamp(player.x, MARGIN + PLAYER_R, W - (MARGIN + PLAYER_R));
+      player.y = clamp(player.y, MARGIN + PLAYER_R, H - (MARGIN + PLAYER_R));
+    }
+
+    // ===== Collision =====
+    function checkCollision() {
+      // 円×円
+      const pr = player.r;
+      for (const b of bullets) {
+        if (!b.alive) continue;
+        const dx = b.x - player.x, dy = b.y - player.y;
+        const rs = b.r + pr;
+        if (dx*dx + dy*dy <= rs*rs) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // ===== Rendering =====
+    function drawBackground() {
+      // 罫線など（軽微な演出）
+      ctx.save();
+      ctx.globalAlpha = 0.08;
+      ctx.strokeStyle = '#6aa7ff';
+      ctx.lineWidth = 1;
+      for (let y = MARGIN; y <= H - MARGIN; y += 64) {
+        ctx.beginPath();
+        ctx.moveTo(MARGIN, y);
+        ctx.lineTo(W - MARGIN, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawHUD() {
+      ctx.save();
+      ctx.fillStyle = '#e2e8f0';
+      ctx.font = '16px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      ctx.textBaseline = 'top';
+      const t = state.time.toFixed(2);
+      ctx.fillText(`Time  ${t}s`, 12, 10);
+      ctx.fillText(`Bullets ${bulletCount}`, 12, 32);
+      if (state.paused) {
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#fefefe';
+        ctx.font = 'bold 32px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('PAUSED', W/2, H/2);
+      }
+      if (state.gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#ffe58a';
+        ctx.font = 'bold 28px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        // 見出し
+        ctx.fillStyle = '#ffe58a';
+        ctx.font = 'bold 32px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.fillText('GAME OVER', W/2, H/2 - 28);
+        // 生存時間
+        const survived = state.time.toFixed(2); // 例: 12.34
+        ctx.fillStyle = '#c8f1ff';
+        ctx.font = 'bold 22px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.fillText(`Survival  ${survived}s`, W/2, H/2 + 4);
+        // リスタートヒント
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '16px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+        ctx.fillText('Press R to Restart', W/2, H/2 + 36);
+      }
+      ctx.restore();
+    }
+
+    function drawPlayer() {
+      ctx.save();
+      if (playerImgReady && playerImg.naturalWidth > 0) {
+        // 画像の縦横比を保持しつつ、過度に大きい場合は縮小（例: 最大辺 32px）
+        const iw = playerImg.naturalWidth;
+        const ih = playerImg.naturalHeight;
+        const maxEdge = 32;                        // 見やすい推奨サイズ
+        const scale = Math.min(1, maxEdge / Math.max(iw, ih)); // アップスケールしない
+        const dw = Math.max(1, Math.round(iw * scale));
+        const dh = Math.max(1, Math.round(ih * scale));
+
+        // 中心に配置
+        ctx.imageSmoothingEnabled = true;          // 細かい見た目が気になる場合
+        ctx.drawImage(playerImg, player.x - dw/2, player.y - dh/2, dw, dh);
+      } else {
+        // フォールバック（元の円描画）
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, 14, 0, Math.PI * 2);
+        ctx.fillStyle = '#78e8ff';
+        ctx.globalAlpha = 0.95;
+        ctx.fill();
+      }
+
+      // ヒットボックス（半径=8px）はそのまま可視化（デバッグ用）
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+      // 任意: ネオンっぽい発光を足したい場合（不要なら2行とも削除）
+      ctx.shadowColor = HITBOX_COLOR;
+      ctx.shadowBlur = 6;
+
+      ctx.strokeStyle = HITBOX_COLOR;
+      ctx.lineWidth   = HITBOX_WIDTH;
+      ctx.globalAlpha = HITBOX_ALPHA;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawBullets() {
+      ctx.save();
+      ctx.fillStyle = '#ff9aa2';
+      for (const b of bullets) {
+        if (!b.alive) continue;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, TWO_PI);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function draw(dt) {
+      ctx.clearRect(0, 0, W, H);
+      drawBackground();
+      drawBullets();
+      drawPlayer();
+      drawHUD();
+    }
+
+    // ===== Loop =====
+    let lastTick = performance.now();
+    function frame(now) {
+      const raw = (now - lastTick) / 1000; // s
+      lastTick = now;
+      // タブ復帰などのスパイクを抑制
+      const dt = clamp(raw, 0, 1/20); // 最大で50ms
+
+      if (state.running && !state.paused && !state.gameOver) {
+        state.time += dt;
+
+        // 生成
+        patternRing(dt);
+        patternSpiral(dt);
+        patternAimed(dt);
+
+        // 更新
+        updateBullets(dt);
+        updatePlayer(dt);
+
+        // 衝突
+        if (checkCollision()) {
+          state.gameOver = true;
+          state.running = false;
+        }
+      }
+
+      draw(dt);
+      requestAnimationFrame(frame);
+    }
+
+    // ===== Controls =====
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyP') { state.paused = !state.paused; }
+      if (e.code === 'KeyR') { resetGame(); }
+    }, { passive: true });
+
+    // ===== Start =====
+    resetGame();
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>
