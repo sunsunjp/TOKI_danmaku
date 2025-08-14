@@ -1,6 +1,7 @@
 # TOKI Danmaku Game
 
 A minimalist, frame-rate–independent bullet-dodging game that runs in modern browsers (Chrome/Firefox). Pure static site—no build tools required.
+
 **Link:** https://sunsunjp.github.io/TOKI_danmaku/
 
 ---
