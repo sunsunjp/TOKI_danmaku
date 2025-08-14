@@ -17,7 +17,9 @@ A minimalist, frame-rate–independent bullet-dodging game that runs in modern b
 
 **Project structure**
 / (repo root)
+
 ├─ index.html      # Game code (HTML + JS)
+
 └─ player.png      # Player sprite (any PNG/JPG)
 
 **GitHub Pages**
