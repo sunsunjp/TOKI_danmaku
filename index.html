@@ -103,27 +103,25 @@ limitations under the License. -->
     // ===== Canvas / DPI =====
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
+    const wrap = document.querySelector('.wrap');
 
     // 内部解像度は固定（W×H, DPR対応）。見た目サイズだけ Viewport に合わせて可変。
     function fitCanvasToViewport() {
-      const vw = Math.max(document.documentElement.clientWidth,  window.innerWidth  || 0);
-      const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+      // 可視領域 = wrap のコンテンツボックス（padding等を差し引いた内側サイズ）
+      const availW = wrap.clientWidth;
+      const availH = wrap.clientHeight;
 
-      // CSSから .wrap の padding-left の値を取得
-      const wrap = document.querySelector('.wrap');
-      const style = window.getComputedStyle(wrap);
-      const paddingLeft = parseFloat(style.paddingLeft);
-      
-      // padding は全方向同じ値と想定し、padding-left を使用
-      const margin = paddingLeft; 
+      // canvas の枠線ぶんを控除（1〜2pxの溢れ防止）
+      const cs = getComputedStyle(canvas);
+      const bw = (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0);
+      const bh = (parseFloat(cs.borderTopWidth)  || 0) + (parseFloat(cs.borderBottomWidth) || 0);
 
       // 画面に収まる最大スケール（アスペクト比を維持）
-      const scale = Math.min((vw - margin * 2) / W, (vh - margin * 2) / H);
+      const scale = Math.min((availW - bw) / W, (availH - bh) / H);
 
+      // 表示サイズ（CSS）だけ更新（内部解像度は setupDPI が担当）
       const cssW = Math.round(W * scale);
-      const cssH = Math.round(H * scale);
-
-      // CSSサイズだけ変更（内部ピクセルはDPRで高精細のまま）
+      const cssH = Math.round(H * scale);  
       canvas.style.width  = cssW + 'px';
       canvas.style.height = cssH + 'px';
     }
