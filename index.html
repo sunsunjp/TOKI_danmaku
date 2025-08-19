@@ -64,7 +64,7 @@ limitations under the License. -->
     // ===== Constants =====
     const W = 720, H = 960;
     const MARGIN = 8;                 // クランプ余白
-    const PLAYER_R = 8;               // ヒットボックス半径
+    const PLAYER_R = 16;              // ヒットボックス半径
     const PLAYER_SPEED = 280;         // キーボード移動 (px/s)
     const FOLLOW_SPEED_MAX = 280;     // ドラッグ追従の速度上限 (px/s)
     const BULLET_POOL_SIZE = 1600;    // 必要に応じて増減
@@ -75,6 +75,7 @@ limitations under the License. -->
     const HITBOX_COLOR = '#39FF14';  // 好きな色（例：ネオングリーン）
     const HITBOX_ALPHA = 1.0;        // 0.0〜1.0（不透明度）
     const HITBOX_WIDTH = 1.8;        // 線の太さ(px)
+    const SHOW_HITBOX = false;       // ヒットボックスを描画するか（true/false）
 
     // ===== Player sprite =====
     const playerImg = new Image();
@@ -430,7 +431,7 @@ limitations under the License. -->
         // 画像の縦横比を保持しつつ、過度に大きい場合は縮小（例: 最大辺 32px）
         const iw = playerImg.naturalWidth;
         const ih = playerImg.naturalHeight;
-        const maxEdge = 32;                        // 見やすい推奨サイズ
+        const maxEdge = PLAYER_R * 2;                          // 見やすい推奨サイズ
         const scale = Math.min(1, maxEdge / Math.max(iw, ih)); // アップスケールしない
         const dw = Math.max(1, Math.round(iw * scale));
         const dh = Math.max(1, Math.round(ih * scale));
@@ -447,18 +448,20 @@ limitations under the License. -->
         ctx.fill();
       }
 
-      // ヒットボックス（半径=8px）はそのまま可視化（デバッグ用）
-      ctx.beginPath();
-      ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
-      // 任意: ネオンっぽい発光を足したい場合（不要なら2行とも削除）
-      ctx.shadowColor = HITBOX_COLOR;
-      ctx.shadowBlur = 6;
+      if (SHOW_HITBOX) {
+        // ヒットボックスはそのまま可視化
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+        // 任意: ネオンっぽい発光を足したい場合（不要なら2行とも削除）
+        // ctx.shadowColor = HITBOX_COLOR;
+        // ctx.shadowBlur = 6;
 
-      ctx.strokeStyle = HITBOX_COLOR;
-      ctx.lineWidth   = HITBOX_WIDTH;
-      ctx.globalAlpha = HITBOX_ALPHA;
-      ctx.stroke();
-      ctx.restore();
+        ctx.strokeStyle = HITBOX_COLOR;
+        ctx.lineWidth   = HITBOX_WIDTH;
+        ctx.globalAlpha = HITBOX_ALPHA;
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     function drawBullets() {
